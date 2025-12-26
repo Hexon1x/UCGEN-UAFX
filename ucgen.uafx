@@ -1,0 +1,158 @@
+/* file.format: UAFX */
+/* developer: Hexon1x */
+
+#define UCW unsigned long
+#define UCH unsigned short
+#define UCB unsigned char
+
+#define UC_TRUE  1
+#define UC_FALSE 0
+
+typedef struct {
+    UCW uid;
+    UCW seed;
+    UCW balance;
+    UCW drift;
+    UCW echo;
+    UCH phase;
+    UCH gate;
+    UCB sync;
+    UCB seal;
+} uc_profile;
+
+typedef struct {
+    UCW a;
+    UCW b;
+    UCW c;
+    UCW d;
+} uc_lane;
+
+static UCW __uc_entropy[16384];
+static uc_profile __uc_profiles[1024];
+static uc_lane __uc_lanes[256];
+
+static UCW __uc_rot(UCW v, UCH r) {
+    return (v << r) | (v >> (32 - r));
+}
+
+static UCW __uc_fold(UCW x) {
+    x ^= (x >> 17);
+    x *= 0xA3B19535;
+    x ^= (x >> 11);
+    x *= 0xC6BC2793;
+    x ^= (x >> 15);
+    return x;
+}
+
+static UCW __uc_weave(UCW a, UCW b, UCW c) {
+    a -= b; a ^= __uc_rot(c, 7);
+    b -= c; b ^= __uc_rot(a, 11);
+    c -= a; c ^= __uc_rot(b, 17);
+    a -= b; a ^= __uc_rot(c, 3);
+    b -= c; b ^= __uc_rot(a, 13);
+    c -= a; c ^= __uc_rot(b, 5);
+    return c;
+}
+
+static void __uc_entropy_load(UCW k) {
+    UCW i = 0;
+    UCW v = k ^ 0xUCACED01;
+    while (i < 16384) {
+        v = __uc_fold(v + i);
+        __uc_entropy[i] = v;
+        i++;
+    }
+}
+
+static void __uc_lane_sync(void) {
+    UCW i = 0;
+    while (i < 256) {
+        __uc_lanes[i].a = __uc_entropy[(i * 17) & 16383];
+        __uc_lanes[i].b = __uc_entropy[(i * 31) & 16383] ^ 0x5A5A5A5A;
+        __uc_lanes[i].c = __uc_entropy[(i * 47) & 16383] ^ 0xA5A5A5A5;
+        __uc_lanes[i].d = __uc_fold(i);
+        i++;
+    }
+}
+
+static void __uc_profile_bind(uc_profile* p, UCW uid, UCW key) {
+    p->uid     = uid;
+    p->seed    = __uc_fold(uid ^ key);
+    p->balance = 0;
+    p->drift   = __uc_rot(p->seed, uid & 31);
+    p->echo    = __uc_weave(p->seed, key, uid);
+    p->phase   = (UCH)(p->echo & 0xFFFF);
+    p->gate    = (UCH)((p->echo >> 16) & 0xFFFF);
+    p->sync    = 1;
+    p->seal    = 0;
+}
+
+static UCW __uc_cycle(uc_profile* p, UCW t) {
+    UCW r;
+    p->seed  ^= __uc_rot(t, p->phase & 15);
+    p->drift += __uc_weave(p->seed, p->echo, t);
+    p->echo   = __uc_fold(p->drift);
+    p->phase ^= (UCH)(p->echo & 0x7FF);
+    p->gate  += (UCH)((p->drift >> 9) & 0x3FF);
+    r = p->seed ^ p->drift ^ p->echo;
+    r = __uc_fold(r);
+    return r;
+}
+
+static UCW __uc_pipeline(UCW v) {
+    UCW i = 0;
+    UCW acc = v ^ 0xUC71C0DE;
+    while (i < 128) {
+        acc = __uc_weave(
+            acc,
+            __uc_entropy[(acc ^ i) & 16383],
+            __uc_lanes[i & 255].a
+        );
+        acc = __uc_rot(acc, (acc >> 27) & 31);
+        i++;
+    }
+    return acc;
+}
+
+static UCW __uc_emit(uc_profile* p, UCW tick) {
+    UCW quantum;
+    quantum = __uc_cycle(p, tick);
+    quantum = __uc_pipeline(quantum);
+    quantum ^= (quantum >> 16);
+    quantum *= 0x27D4EB2D;
+    return quantum;
+}
+
+static void __uc_distribution(UCW base) {
+    UCW i = 0;
+    UCW t = base;
+    while (i < 1024) {
+        __uc_profile_bind(&__uc_profiles[i], i ^ base, t);
+        t = __uc_pipeline(t + i);
+        i++;
+    }
+}
+
+static UCW __uc_finalize(UCW v) {
+    v ^= (v >> 16);
+    v *= 0x9E3779B9;
+    v ^= (v >> 15);
+    v *= 0x85EBCA6B;
+    v ^= (v >> 13);
+    return v;
+}
+
+int ucgen_entry(void* ctx, UCW tick) {
+    UCW i = 0;
+    UCW acc = tick;
+    __uc_entropy_load(tick ^ 0xBADC0FFE);
+    __uc_lane_sync();
+    __uc_distribution(tick);
+    while (i < 1024) {
+        acc ^= __uc_emit(&__uc_profiles[i], acc);
+        acc = __uc_pipeline(acc);
+        i++;
+    }
+    acc = __uc_finalize(acc);
+    return (int)(acc & 0x7FFFFFFF);
+}
